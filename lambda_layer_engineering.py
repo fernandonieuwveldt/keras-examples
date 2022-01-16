@@ -13,7 +13,7 @@ def data_frame_to_dataset(data_frame_features=None, data_frame_labels=None):
     return tf.data.Dataset.from_tensor_slices(dict(data_frame_features))
 
 
-def create_inputs(dataset=None, features=None):
+def _create_inputs(dataset=None, features=None):
     """Create model inputs
     Args:
         dataset (tf.data.Dataset): Features Data to apply encoder on.
@@ -31,20 +31,18 @@ def create_inputs(dataset=None, features=None):
         for feature in features}
 
 
-if __name__ == '__main__':
-    dataframe = pd.read_csv('heart.csv')
-    labels = dataframe.pop("target")
-    dataset = data_frame_to_dataset(dataframe, labels).batch(32)
-    # features = dataframe.columns.tolist()
-    # feature_layer_inputs = create_inputs(dataset, features)
+def create_inputs(data_type_mapper):
+    """Create model inputs
+    Args:
+        data_type_mapper (dict): Dictionary with feature as key and dtype as value
+    Returns:
+        (dict): Keras inputs for each feature
+    """
+    return {feature: tf.keras.Input(shape=(1,), name=feature, dtype=dtype)\
+        for feature, dtype in data_type_mapper.items()}
 
-    # dataset1 = tf.data.experimental.CsvDataset(
-    #     'heart.csv',
-    #     #batch_size=32,
-    #     label_name='target',
-    #     #num_epochs=1,
-    #     #ignore_errors=True
-    # )
+
+if __name__ == '__main__':
 
     features = [
        'age',
@@ -64,7 +62,30 @@ if __name__ == '__main__':
     
     numeric_features =  ['age', 'trestbps', 'chol', 'thalach', 'oldpeak', 'slope']
 
-    feature_layer_inputs = create_inputs(dataset, features)
+    dtype_mapper = {
+        # numeric features
+        'age': tf.float32,
+        'trestbps': tf.float32,
+        'chol': tf.float32,
+        'thalach': tf.float32,
+        'oldpeak': tf.float32,
+        'slope': tf.float32,
+        # categoric features
+        'sex': tf.int32, # float
+        'exang': tf.int32, # float
+        'cp': tf.int32,
+        'fbs': tf.int32, # float
+        'restecg': tf.int32,
+        'ca': tf.int32,
+        # string categoric
+        'thal': tf.string
+    }
+    dataframe = pd.read_csv('heart.csv')
+    labels = dataframe.pop("target")
+    dataframe[numeric_features] = dataframe[numeric_features].apply(pd.to_numeric)
+    dataset = data_frame_to_dataset(dataframe, labels).batch(32)
+
+    feature_layer_inputs = create_inputs(dtype_mapper)
 
     # Define functions for engineered features
     def ratio(x):
@@ -75,9 +96,18 @@ if __name__ == '__main__':
         """compute the crossing of two features"""
         return tf.cast(x[0] * x[1], dtype = tf.float32)
 
+    # TODO: create one function for the three below
     def is_fixed(x):
         """encode categoric feature if value is equal to fixed"""
         return tf.cast(x == 'fixed', dtype = tf.float32)
+
+    def is_reversible(x):
+        """encode categoric feature if value is equal to fixed"""
+        return tf.cast(x == 'reversible', dtype = tf.float32)
+    
+    def is_normal(x):
+        """encode categoric feature if value is equal to fixed"""
+        return tf.cast(x == 'normal', dtype = tf.float32)
 
     # Doing this way your feature engineering is part of your network architecture and can be 
     # persisted and loaded for inference as a standalone. Note the caveats of Lambda layers when
@@ -94,18 +124,27 @@ if __name__ == '__main__':
     is_fixed = tf.keras.layers.Lambda(is_fixed)(
        feature_layer_inputs['thal']
     )
+    is_normal = tf.keras.layers.Lambda(is_normal)(
+       feature_layer_inputs['thal']
+    )
+    is_reversible = tf.keras.layers.Lambda(is_reversible)(
+       feature_layer_inputs['thal']
+    )
 
     # concat all newly created features into one layer
-    feature_layer = tf.keras.layers.concatenate([trest_chol_ratio, sex_cp_cross, is_fixed])
+    feature_layer = tf.keras.layers.concatenate([trest_chol_ratio, sex_cp_cross, is_fixed, is_normal, is_reversible])
+    numeric_feature_layer = tf.keras.layers.concatenate(
+        [feature_layer_inputs[feature] for feature in numeric_features]
+    )
 
     # Add the rest of features
     oldpeak_layer = feature_layer_inputs['oldpeak']
-    feature_layer = tf.keras.layers.concatenate([feature_layer, oldpeak_layer])
-    dense_layer = tf.keras.layers.Dense(32)(feature_layer)
-    output_layer = tf.keras.layers.Dense(1, activation='sigmoid')(feature_layer)
+    feature_layer = tf.keras.layers.concatenate([feature_layer, numeric_feature_layer])
+    batch_layer = tf.keras.layers.BatchNormalization()(feature_layer)
+    output_layer = tf.keras.layers.Dense(1, activation='sigmoid')(batch_layer)
     model = tf.keras.Model(inputs=feature_layer_inputs, outputs=output_layer)
     model.compile(loss=tf.keras.losses.BinaryCrossentropy(label_smoothing=0.0),
-                  optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+                  optimizer=tf.keras.optimizers.Adam(learning_rate=0.01),
                   metrics=[tf.keras.metrics.BinaryAccuracy(name='accuracy'), tf.keras.metrics.AUC(name='auc')]
     )
     model.fit(dataset, epochs=10)
